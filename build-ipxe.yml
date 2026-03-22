@@ -1,0 +1,69 @@
+name: Build iPXE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential liblzma-dev isolinux
+
+      - name: Clone iPXE
+        run: |
+          git clone https://github.com/ipxe/ipxe.git --depth 1 ipxe-src
+
+      - name: Create embedded script
+        run: |
+          cat > ipxe-src/src/embed.script << 'EOF'
+          #!ipxe
+          dhcp
+          chain http://${next-server}:15256/config.ipxe
+          EOF
+
+      - name: Build BIOS (i386 kpxe)
+        run: |
+          cd ipxe-src/src
+          make bin/undionly.kpxe EMBED=embed.script
+
+      - name: Build UEFI x86_64
+        run: |
+          cd ipxe-src/src
+          make bin-x86_64-efi/ipxe.efi EMBED=embed.script
+
+      - name: Build UEFI i386
+        run: |
+          cd ipxe-src/src
+          make bin-i386-efi/ipxe.efi EMBED=embed.script
+
+      - name: Build UEFI ARM64
+        run: |
+          cd ipxe-src/src
+          make bin-arm64-efi/ipxe.efi EMBED=embed.script
+
+      - name: Build UEFI ARM32
+        run: |
+          cd ipxe-src/src
+          make bin-arm32-efi/ipxe.efi EMBED=embed.script
+
+      - name: Package
+        run: |
+          mkdir -p output
+          cp ipxe-src/src/bin/undionly.kpxe output/ipxe-i386.kpxe
+          cp ipxe-src/src/bin-x86_64-efi/ipxe.efi output/ipxe-x86_64.efi
+          cp ipxe-src/src/bin-i386-efi/ipxe.efi output/ipxe-i386.efi
+          cp ipxe-src/src/bin-arm64-efi/ipxe.efi output/ipxe-arm64.efi
+          cp ipxe-src/src/bin-arm32-efi/ipxe.efi output/ipxe-arm32.efi
+          cp config.ipxe output/config.ipxe
+          tar -czf ipxe.tar.gz -C output .
+          ls -la output/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipxe-binaries
+          path: ipxe.tar.gz
