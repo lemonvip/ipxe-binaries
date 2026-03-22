@@ -12,7 +12,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential liblzma-dev isolinux
+          sudo apt-get install -y build-essential liblzma-dev isolinux gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
 
       - name: Clone iPXE
         run: |
@@ -44,12 +44,12 @@ jobs:
       - name: Build UEFI ARM64
         run: |
           cd ipxe-src/src
-          make bin-arm64-efi/ipxe.efi EMBED=embed.script
+          make bin-arm64-efi/ipxe.efi EMBED=embed.script CROSS_COMPILE=aarch64-linux-gnu-
 
       - name: Build UEFI ARM32
         run: |
           cd ipxe-src/src
-          make bin-arm32-efi/ipxe.efi EMBED=embed.script
+          make bin-arm32-efi/ipxe.efi EMBED=embed.script CROSS_COMPILE=arm-linux-gnueabihf-
 
       - name: Package
         run: |
@@ -59,7 +59,6 @@ jobs:
           cp ipxe-src/src/bin-i386-efi/ipxe.efi output/ipxe-i386.efi
           cp ipxe-src/src/bin-arm64-efi/ipxe.efi output/ipxe-arm64.efi
           cp ipxe-src/src/bin-arm32-efi/ipxe.efi output/ipxe-arm32.efi
-          # 可选：仓库根目录或 boot/ 下有 config.ipxe 才打进包（fork 里可能没有）
           if [ -f config.ipxe ]; then cp config.ipxe output/config.ipxe; elif [ -f boot/config.ipxe ]; then cp boot/config.ipxe output/config.ipxe; fi
           tar -czf ipxe.tar.gz -C output .
           ls -la output/
