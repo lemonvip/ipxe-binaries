@@ -1,10 +1,16 @@
-name: Build iPXE
+name: Build iPXE Binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      httpPort:
+        description: 'HTTP port'
+        required: false
+        default: '15256'
+        type: string
 
 jobs:
-  build:
+  build-ipxe:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -12,58 +18,90 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential liblzma-dev isolinux gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+          sudo apt-get install -y build-essential liblzma-dev \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
 
-      - name: Clone iPXE
+      - name: Clone iPXE (BIOS)
         run: |
-          git clone https://github.com/ipxe/ipxe.git --depth 1 ipxe-src
+          git clone --depth 1 https://github.com/ipxe/ipxe.git ipxe-bios
 
-      - name: Create embedded script
+      - name: Clone iPXE (EFI)
         run: |
-          cat > ipxe-src/src/embed.script << 'EOF'
+          git clone --depth 1 https://github.com/ipxe/ipxe.git ipxe-efi
+
+      - name: Create embed script
+        run: |
+          # FOG-style embed script
+          # 优先级: proxydhcp/next-server (Option 66) > next-server (Option 54)
+          # iPXE embed 脚本 chain 到 HTTP 服务器的 config.ipxe
+          cat > ipxe-bios/src/embed.script << 'EMBED'
           #!ipxe
-          dhcp
-          chain http://${next-server}:15256/config.ipxe
-          EOF
+          isset ${net0/mac} && ifopen net0 && dhcp net0 || goto dhcpnet1
+          echo Received DHCP on net0 && goto proxycheck
+          :dhcpnet1
+          isset ${net1/mac} && ifopen net1 && dhcp net1 || goto dhcpnet2
+          echo Received DHCP on net1 && goto proxycheck
+          :dhcpnet2
+          isset ${net2/mac} && ifopen net2 && dhcp net2 || goto dhcpall
+          echo Received DHCP on net2 && goto proxycheck
+          :dhcpall
+          dhcp && goto proxycheck || goto dhcperror
+          :dhcperror
+          prompt --key s --timeout 10000 DHCP failed, hit 's' for shell; reboot in 10s && shell || reboot
+          :proxycheck
+          # ${proxydhcp/next-server} 来自 ProxyDHCP Option 66，${next-server} 来自 DHCP Option 54
+          isset ${proxydhcp/next-server} && set next-server ${proxydhcp/next-server} || goto nextservercheck
+          :nextservercheck
+          isset ${next-server} && goto netboot || goto setserv
+          :setserv
+          echo -n Enter iDeployX server IP: && read next-server && goto netboot || goto setserv
+          :chainloadfailed
+          prompt --key s --timeout 10000 Chain failed, hit 's' for shell; reboot in 10s && shell || reboot
+          :netboot
+          chain http://${next-server}:15256/config.ipxe || goto chainloadfailed
+          EMBED
+          cp ipxe-bios/src/embed.script ipxe-efi/src/embed.script
 
-      - name: Build BIOS (i386 kpxe)
+      - name: Build BIOS iPXE (i386 kpxe)
         run: |
-          cd ipxe-src/src
-          make bin/undionly.kpxe EMBED=embed.script
+          cd ipxe-bios/src
+          make -j$(nproc) bin/undionly.kpxe EMBED=embed.script
 
       - name: Build UEFI x86_64
         run: |
-          cd ipxe-src/src
-          make bin-x86_64-efi/ipxe.efi EMBED=embed.script
+          cd ipxe-efi/src
+          make -j$(nproc) bin-x86_64-efi/ipxe.efi EMBED=embed.script
 
       - name: Build UEFI i386
         run: |
-          cd ipxe-src/src
-          make bin-i386-efi/ipxe.efi EMBED=embed.script
+          cd ipxe-efi/src
+          make -j$(nproc) bin-i386-efi/ipxe.efi EMBED=embed.script
 
       - name: Build UEFI ARM64
         run: |
-          cd ipxe-src/src
-          make bin-arm64-efi/ipxe.efi EMBED=embed.script CROSS_COMPILE=aarch64-linux-gnu-
+          cd ipxe-efi/src
+          make -j$(nproc) bin-arm64-efi/ipxe.efi EMBED=embed.script CROSS_COMPILE=aarch64-linux-gnu-
 
       - name: Build UEFI ARM32
         run: |
-          cd ipxe-src/src
-          make bin-arm32-efi/ipxe.efi EMBED=embed.script CROSS_COMPILE=arm-linux-gnueabihf-
+          cd ipxe-efi/src
+          make -j$(nproc) bin-arm32-efi/ipxe.efi EMBED=embed.script CROSS_COMPILE=arm-linux-gnueabihf-
 
-      - name: Package
+      - name: Verify embed script
         run: |
-          mkdir -p output
-          cp ipxe-src/src/bin/undionly.kpxe output/ipxe-i386.kpxe
-          cp ipxe-src/src/bin-x86_64-efi/ipxe.efi output/ipxe-x86_64.efi
-          cp ipxe-src/src/bin-i386-efi/ipxe.efi output/ipxe-i386.efi
-          cp ipxe-src/src/bin-arm64-efi/ipxe.efi output/ipxe-arm64.efi
-          cp ipxe-src/src/bin-arm32-efi/ipxe.efi output/ipxe-arm32.efi
-          if [ -f config.ipxe ]; then cp config.ipxe output/config.ipxe; elif [ -f boot/config.ipxe ]; then cp boot/config.ipxe output/config.ipxe; fi
-          tar -czf ipxe.tar.gz -C output .
-          ls -la output/
+          echo "=== Verifying embed script in ipxe-x86_64.efi ==="
+          strings ipxe-efi/src/bin-x86_64-efi/ipxe.efi | grep -i "config.ipxe" | head -3
+          echo ""
+          echo "=== File sizes ==="
+          ls -la ipxe-bios/src/bin/undionly.kpxe ipxe-efi/src/bin-x86_64-efi/ipxe.efi
 
       - uses: actions/upload-artifact@v4
         with:
           name: ipxe-binaries
-          path: ipxe.tar.gz
+          path: |
+            ipxe-bios/src/bin/undionly.kpxe
+            ipxe-efi/src/bin-x86_64-efi/ipxe.efi
+            ipxe-efi/src/bin-i386-efi/ipxe.efi
+            ipxe-efi/src/bin-arm64-efi/ipxe.efi
+            ipxe-efi/src/bin-arm32-efi/ipxe.efi
